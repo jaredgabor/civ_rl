@@ -3,12 +3,14 @@ import numpy as np
 BASE_STRENGTH_REFERENCE = 25
 BASE_HP = 100
 
+
 class CityStates:
-    '''
-    This is a container for all the state vectors 
-    describing cities.  It has nothing to do with Civ6 
+    """
+    This is a container for all the state vectors
+    describing cities.  It has nothing to do with Civ6
     independent "City States."
-    '''
+    """
+
     def __init__(self, max_cities=10):
         self.city_location = np.zeros((max_cities, 2), np.int8)
         self.city_population = np.zeros(max_cities, dtype=np.int8)
@@ -29,24 +31,22 @@ class CityStates:
         base_strength = reference_unit_strength - 10
 
         # Strength is the larger of the base_strength (which is
-        # based on the strongest unit) and the garrison unit's 
+        # based on the strongest unit) and the garrison unit's
         # strength
-        garrison_strength = self.get_garrison_unit_strength(
-            ind, units)
+        garrison_strength = self.get_garrison_unit_strength(ind, units)
         base_combat_strength = max(base_strength, garrison_strength)
 
         # Add in bonuses
         wall_bonus = 0
         hill_bonus = 0
-        undamaged_combat_strength = (
-            base_combat_strength + wall_bonus + hill_bonus)
-        
+        undamaged_combat_strength = base_combat_strength + wall_bonus + hill_bonus
+
         # Calculate the damaged city penalty
         current_hp = self.city_hp[ind]
         max_hp = BASE_HP
         hp_penalty = (current_hp / max_hp - 1) * 10
         return undamaged_combat_strength + hp_penalty
-    
+
     def apply_city_damage(self, ind, damage):
         self.city_hp[ind] -= damage
 
@@ -57,9 +57,9 @@ class CityStates:
             if unit_type.attack_range == 0:
                 capture_flag = True
         return capture_flag
-    
+
     def heal_cities(self):
-        # TODO: check if healing should occur 
+        # TODO: check if healing should occur
         # (depending on whether city is under siege)
         self.city_hp += 10
 

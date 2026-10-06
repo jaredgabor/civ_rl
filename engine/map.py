@@ -1,189 +1,232 @@
+"""Static odd-row-offset hex map and terrain queries."""
+
+from collections.abc import Iterable
+from enum import IntEnum
+
 import numpy as np
 
+from engine.types import Coordinate, Feature, Terrain
 
-terrain_types = {
-    1: "OCEAN",
-    2: "PLAINS",
-    3: "PLAINS-WOODS",
-    4: "HILLS",
-    5: "HILLS-WOODS",
-    6: "MOUNTAINS",
+LEGACY_TERRAIN: dict[int, tuple[Terrain, Feature]] = {
+    1: (Terrain.OCEAN, Feature.NONE),
+    2: (Terrain.PLAINS, Feature.NONE),
+    3: (Terrain.PLAINS, Feature.WOODS),
+    4: (Terrain.HILLS, Feature.NONE),
+    5: (Terrain.HILLS, Feature.WOODS),
+    6: (Terrain.MOUNTAINS, Feature.NONE),
 }
 
 
+def offset_to_cube(row: int, col: int) -> tuple[int, int, int]:
+    """Convert odd-row horizontal offset coordinates to cube coordinates."""
+    if type(row) is not int or type(col) is not int:
+        raise ValueError("row and col must be integers")
+    x = col - (row - (row & 1)) // 2
+    z = row
+    return x, -x - z, z
+
+
+def hex_distance(a: Coordinate, b: Coordinate) -> int:
+    ac, bc = offset_to_cube(*a), offset_to_cube(*b)
+    return max(abs(ac[i] - bc[i]) for i in range(3))
+
+
 class HexMap:
-    def __init__(self, width, height):
+    """Validated static map; freeze before passing it into a game state."""
+
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        terrain: Iterable[Iterable[int]] | None = None,
+        features: Iterable[Iterable[int]] | None = None,
+        rivers: Iterable[tuple[Coordinate, Coordinate]] = (),
+    ) -> None:
+        if (
+            type(width) is not int
+            or type(height) is not int
+            or width <= 0
+            or height <= 0
+        ):
+            raise ValueError("map width and height must be positive integers")
         self.width = width
         self.height = height
+        self._terrain = self._validated_array(terrain, Terrain, Terrain.PLAINS)
+        self._features = self._validated_array(features, Feature, Feature.NONE)
+        self._rivers: set[tuple[Coordinate, Coordinate]] = set()
+        self._frozen = False
+        self.validate()
+        for a, b in rivers:
+            self.add_river(a, b)
 
-        self.terrain = np.zeros((height, width), dtype=np.int8)
-        self.city_positions = set()
-        self.rivers = set()
+    def _validated_array(self, values, enum_type, default) -> np.ndarray:
+        if values is None:
+            return np.full((self.height, self.width), int(default), dtype=np.int8)
+        rows = [list(row) for row in values]
+        if len(rows) != self.height or any(len(row) != self.width for row in rows):
+            raise ValueError("map arrays must have shape (height, width)")
+        for row in rows:
+            for value in row:
+                if isinstance(value, IntEnum) and not isinstance(value, enum_type):
+                    raise ValueError("map value uses the wrong enum type")
+                if not isinstance(value, (int, np.integer)):
+                    raise ValueError("map values must be integers of the correct type")
+                try:
+                    enum_type(value)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid {enum_type.__name__} value: {value}"
+                    ) from exc
+        return np.array(rows, dtype=np.int8)
 
-    def in_bounds(self, row, col):
-        '''
-        Determine if a given coordinate is in-bounds for the map
+    @classmethod
+    def from_legacy(cls, legacy: Iterable[Iterable[int]]) -> "HexMap":
+        rows = [list(row) for row in legacy]
+        if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
+            raise ValueError("legacy map must be rectangular and nonempty")
+        try:
+            decoded = [[LEGACY_TERRAIN[value] for value in row] for row in rows]
+        except KeyError as exc:
+            raise ValueError(f"invalid legacy terrain ID: {exc.args[0]}") from exc
+        return cls(
+            len(rows[0]),
+            len(rows),
+            terrain=[[int(cell[0]) for cell in row] for row in decoded],
+            features=[[int(cell[1]) for cell in row] for row in decoded],
+        )
 
-        :param self: Description
-        :param row: Description
-        :param col: Description
-        :return: Description
-        :rtype: Any
-        '''
+    @property
+    def terrain(self) -> np.ndarray:
+        """Return a copy; callers cannot mutate map storage through it."""
+        return self._terrain.copy()
+
+    @property
+    def features(self) -> np.ndarray:
+        return self._features.copy()
+
+    @property
+    def rivers(self) -> frozenset[tuple[Coordinate, Coordinate]]:
+        return frozenset(self._rivers)
+
+    def freeze(self) -> "HexMap":
+        self.validate()
+        self._frozen = True
+        self._terrain.flags.writeable = False
+        self._features.flags.writeable = False
+        return self
+
+    def in_bounds(self, row: int, col: int) -> bool:
         return 0 <= row < self.height and 0 <= col < self.width
 
-    def get_neighbors(self, row, col):
-        '''
-        return a list of neighboring tile coordinates
+    def _check_coord(self, coord: Coordinate) -> None:
+        if (
+            not isinstance(coord, tuple)
+            or len(coord) != 2
+            or any(type(value) is not int for value in coord)
+            or not self.in_bounds(*coord)
+        ):
+            raise ValueError(f"invalid map coordinate: {coord}")
 
-        :param self: Description
-        :param row: Description
-        :param col: Description
-        '''
-        nbrs = []
-        r = row
-        c = col
-        if row % 2 == 0:
-            nbrs = [
-                (r, c - 1),
-                (r, c + 1),
-                (r - 1, c),
-                (r - 1, c - 1),
-                (r + 1, c),
-                (r + 1, c - 1),
-            ]
-        else:
-            nbrs = [
-                (r, c - 1),
-                (r, c + 1),
-                (r - 1, c + 1),
-                (r - 1, c),
-                (r + 1, c + 1),
-                (r + 1, c),
-            ]
+    def get_neighbors(self, row: int, col: int) -> list[Coordinate]:
+        self._check_coord((row, col))
+        directions = (
+            [(0, -1), (0, 1), (-1, 0), (-1, -1), (1, 0), (1, -1)]
+            if row % 2 == 0
+            else [(0, -1), (0, 1), (-1, 1), (-1, 0), (1, 1), (1, 0)]
+        )
+        return [
+            (row + dr, col + dc)
+            for dr, dc in directions
+            if self.in_bounds(row + dr, col + dc)
+        ]
 
-        # Remove proposed neighbor tiles that are out of bounds
-        neighbors = [tile_coord for tile_coord in nbrs if self.in_bounds(*tile_coord)]
-        return neighbors
-
-    def are_neighbors(self, a, b):
-        '''
-        Determine whether two tiles are adjacent/neighbors.
-
-        :param self: Description
-        :param a: Tuple denoting the coordinates of tile A
-        :param b: Tuple denoting the coordinates of tile B
-        '''
+    def are_neighbors(self, a: Coordinate, b: Coordinate) -> bool:
+        self._check_coord(a)
+        self._check_coord(b)
         return b in self.get_neighbors(*a)
 
-    def get_tile_properties(self, row, col):
-        if not self.in_bounds(row, col):
-            raise ValueError(f"({row}, {col}) is out of bounds")
-        properties = {
-            'terrain_type': self.terrain[row, col]
+    def distance(self, a: Coordinate, b: Coordinate) -> int:
+        self._check_coord(a)
+        self._check_coord(b)
+        return hex_distance(a, b)
+
+    def terrain_at(self, coord: Coordinate) -> Terrain:
+        self._check_coord(coord)
+        return Terrain(int(self._terrain[coord]))
+
+    def feature_at(self, coord: Coordinate) -> Feature:
+        self._check_coord(coord)
+        return Feature(int(self._features[coord]))
+
+    def get_tile_properties(self, row: int, col: int) -> dict[str, Terrain | Feature]:
+        coord = (row, col)
+        return {
+            "terrain_type": self.terrain_at(coord),
+            "feature_type": self.feature_at(coord),
         }
-        return properties
 
-    def add_river(self, a, b):
-        if not self.are_neighbors(a, b):
-            raise ValueError("River must border adjacent tiles")
-        edge = tuple(sorted([a, b]))
-        self.rivers.add(edge)
+    def set_tile(
+        self, coord: Coordinate, terrain: Terrain, feature: Feature = Feature.NONE
+    ) -> None:
+        if self._frozen:
+            raise RuntimeError("cannot edit a frozen map")
+        self._check_coord(coord)
+        if isinstance(terrain, IntEnum) and not isinstance(terrain, Terrain):
+            raise ValueError("terrain uses the wrong enum type")
+        if isinstance(feature, IntEnum) and not isinstance(feature, Feature):
+            raise ValueError("feature uses the wrong enum type")
+        try:
+            terrain = Terrain(terrain)
+            feature = Feature(feature)
+        except ValueError as exc:
+            raise ValueError("invalid terrain or feature") from exc
+        self._validate_combination(terrain, feature)
+        self._terrain[coord] = terrain
+        self._features[coord] = feature
 
-    def edge_has_river(self, a, b):
-        '''
-        Determine whether an edge shared between 2 tiles has a river.
+    @staticmethod
+    def _validate_combination(terrain: Terrain, feature: Feature) -> None:
+        if terrain in (Terrain.OCEAN, Terrain.MOUNTAINS) and feature != Feature.NONE:
+            raise ValueError("ocean and mountains cannot have woods")
 
-        :param self: Description
-        :param a: Description
-        :param b: Description
-        '''
-        return tuple(sorted([a, b])) in self.rivers
-
-    def generate_random_terrain(
-        self,
-        base_weights=None,
-        cluster_strength=0.7,
-        seed=None,
-    ):
-        '''
-        Generate terrain for every tile with local clustering in one pass.
-
-        Each tile is assigned exactly one terrain type. Terrain selection
-        combines global base weights with already-assigned neighbor terrain.
-
-        :param base_weights: Optional dict[int, float]
-        :param cluster_strength: Blend factor in [0, 1] favoring neighbor terrain
-        :param seed: Optional RNG seed for reproducibility
-        '''
-        if not 0 <= cluster_strength <= 1:
-            raise ValueError("cluster_strength must be between 0 and 1")
-
-        rng = np.random.default_rng(seed)
-        terrain_ids = np.array(sorted(terrain_types.keys()), dtype=np.int8)
-        terrain_index = {terrain_id: idx for idx, terrain_id in enumerate(terrain_ids)}
-
-        default_weights = {
-            1: 0.30,  # OCEAN
-            2: 0.25,  # PLAINS
-            3: 0.15,  # PLAINS-WOODS
-            4: 0.15,  # HILLS
-            5: 0.10,  # HILLS-WOODS
-            6: 0.05,  # MOUNTAINS
-        }
-        if base_weights is None:
-            base_weights = default_weights
-
-        probs = np.array(
-            [float(base_weights.get(int(t), 0.0)) for t in terrain_ids],
-            dtype=np.float64,
-        )
-        if np.any(probs < 0):
-            raise ValueError("base_weights cannot contain negative values")
-        if probs.sum() <= 0:
-            raise ValueError("base_weights must contain at least one positive value")
-        probs = probs / probs.sum()
-
-        # 0 means "unassigned" during generation.
-        self.terrain = np.zeros((self.height, self.width), dtype=np.int8)
-
+    def validate(self) -> None:
         for row in range(self.height):
             for col in range(self.width):
-                neighbors = self.get_neighbors(row, col)
-                assigned_neighbors = [
-                    self.terrain[r, c]
-                    for r, c in neighbors
-                    if self.terrain[r, c] != 0
-                ]
+                self._validate_combination(
+                    self.terrain_at((row, col)), self.feature_at((row, col))
+                )
+        for a, b in self._rivers:
+            if not self.are_neighbors(a, b):
+                raise ValueError("river endpoints must be adjacent")
 
-                if assigned_neighbors:
-                    counts = np.zeros(len(terrain_ids), dtype=np.float64)
-                    for terrain_id in assigned_neighbors:
-                        counts[terrain_index[int(terrain_id)]] += 1
-                    local_probs = counts / counts.sum()
-                    blended = ((1 - cluster_strength) * probs) + (
-                        cluster_strength * local_probs
-                    )
-                else:
-                    blended = probs
+    def is_passable(self, coord: Coordinate) -> bool:
+        return self.terrain_at(coord) not in (Terrain.OCEAN, Terrain.MOUNTAINS)
 
-                blended = blended / blended.sum()
-                self.terrain[row, col] = rng.choice(terrain_ids, p=blended)
-
-
-    @classmethod
-    def generate_random_map(
-        cls, width, height, myseed=None
-        ):
-        mymap = cls(width, height)
-        mymap.generate_random_terrain(
-            seed=myseed
+    def movement_cost(self, coord: Coordinate) -> int | None:
+        """Entry cost, or None for an impassable tile."""
+        if not self.is_passable(coord):
+            return None
+        return (
+            2
+            if (
+                self.terrain_at(coord) == Terrain.HILLS
+                or self.feature_at(coord) == Feature.WOODS
+            )
+            else 1
         )
-        return mymap
-    
-    @classmethod
-    def generate_mapA(cls):
-        seed = 545
-        size = 8
-        return cls.generate_random_map(size, size)
-        
+
+    @staticmethod
+    def _edge(a: Coordinate, b: Coordinate) -> tuple[Coordinate, Coordinate]:
+        return tuple(sorted((a, b)))
+
+    def add_river(self, a: Coordinate, b: Coordinate) -> None:
+        if self._frozen:
+            raise RuntimeError("cannot edit a frozen map")
+        if not self.are_neighbors(a, b):
+            raise ValueError("river endpoints must be adjacent")
+        self._rivers.add(self._edge(a, b))
+
+    def edge_has_river(self, a: Coordinate, b: Coordinate) -> bool:
+        if not self.are_neighbors(a, b):
+            raise ValueError("river query requires neighboring tiles")
+        return self._edge(a, b) in self._rivers

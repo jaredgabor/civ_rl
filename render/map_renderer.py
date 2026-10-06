@@ -1,4 +1,5 @@
 import math
+
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, RegularPolygon
 
@@ -11,11 +12,10 @@ class HexMapRenderer:
         self.terrain_colors = {
             1: "#3b82f6",  # OCEAN
             2: "#84cc16",  # PLAINS
-            3: "#22c55e",  # PLAINS-WOODS
-            4: "#a16207",  # HILLS
-            5: "#15803d",  # HILLS-WOODS
-            6: "#525252",  # MOUNTAINS
+            3: "#a16207",  # HILLS
+            4: "#525252",  # MOUNTAINS
         }
+        self.woods_colors = {2: "#22c55e", 3: "#15803d"}
         self.default_color = "#ff00ff"
 
     def tile_center(self, row, col):
@@ -62,7 +62,7 @@ class HexMapRenderer:
         cities=None,
         show_tile_coords=False,
     ):
-        '''
+        """
         Render a HexMap with terrain colors and optional overlays.
 
         :param hex_map: engine.map.HexMap
@@ -71,7 +71,7 @@ class HexMapRenderer:
         :param cities: Optional dict[(row, col)] -> hp
         :param show_tile_coords: If true, draw row/col labels in each tile
         :return: (fig, ax)
-        '''
+        """
         if plt is None:
             raise ImportError(
                 "matplotlib is required for HexMapRenderer. Install it with: pip install matplotlib"
@@ -85,10 +85,16 @@ class HexMapRenderer:
         units = units or {}
         cities = cities or {}
 
+        terrain = hex_map.terrain
+        features = hex_map.features
         for row in range(hex_map.height):
             for col in range(hex_map.width):
-                terrain_id = int(hex_map.terrain[row, col])
-                face_color = self.terrain_colors.get(terrain_id, self.default_color)
+                terrain_id = int(terrain[row, col])
+                face_color = (
+                    self.woods_colors.get(terrain_id, self.default_color)
+                    if features[row, col]
+                    else self.terrain_colors.get(terrain_id, self.default_color)
+                )
                 cx, cy = self.tile_center(row, col)
 
                 hex_patch = RegularPolygon(
@@ -152,7 +158,7 @@ class HexMapRenderer:
                 numVertices=3,
                 radius=city_radius,
                 orientation=math.pi / 2,
-                facecolor="black", ### "#ef4444",
+                facecolor="black",  ### "#ef4444",
                 edgecolor="black",
                 linewidth=0.8,
                 zorder=7,
@@ -162,7 +168,7 @@ class HexMapRenderer:
                 numVertices=3,
                 radius=city_radius,
                 orientation=-math.pi / 2,
-                facecolor="black", ### "#ef4444",
+                facecolor="black",  ### "#ef4444",
                 edgecolor="black",
                 linewidth=0.8,
                 zorder=7,
@@ -182,7 +188,6 @@ class HexMapRenderer:
                 )
 
         # River rendering on shared edges between neighboring tiles.
-        print('doing rivers')
         for edge in getattr(hex_map, "rivers", set()):
             if len(edge) != 2:
                 continue
